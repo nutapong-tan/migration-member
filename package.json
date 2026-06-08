@@ -1,0 +1,19 @@
+{
+  "name": "migration-member",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-time member subscription migration scripts",
+  "scripts": {
+    "sync:revenuecat-native:uat": "node scripts/revenuecat-native-iap-migration.js --env=uat",
+    "sync:revenuecat-native:prod": "node scripts/revenuecat-native-iap-migration.js --env=prod",
+    "check": "for file in scripts/*.js; do node --check \"$file\"; done"
+  },
+  "dependencies": {
+    "@apple/app-store-server-library": "1.6.0",
+    "@elastic/elasticsearch": "^8.17.1",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "googleapis": "^171.4.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
