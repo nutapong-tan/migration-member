@@ -133,15 +133,26 @@ async function main() {
           // Stage 2 draft: after log validation, uncomment this block to copy
           // the full member document into members-migration without touching members.
           // The old values stay in ref_* fields for rollback tracing.
-          // const migrationDocument = buildMigrationDocument(
-          //   member,
-          //   updateData,
-          //   new Date().toISOString()
-          // );
-          // await runtime.esClient.index({
-          //   index: MEMBER_MIGRATION_INDEX,
+          const migrationDocument = buildMigrationDocument(
+            member,
+            updateData,
+            new Date().toISOString()
+          );
+          await runtime.esClient.index({
+            index: MEMBER_MIGRATION_INDEX,
+            id: member._id,
+            document: migrationDocument,
+          });
+
+          // Stage 3 draft: final update back into the real members index.
+          // Keep this commented until logs and members-migration documents are verified.
+          // await runtime.esClient.update({
+          //   index: MEMBER_INDEX,
           //   id: member._id,
-          //   document: migrationDocument,
+          //   doc: {
+          //     ...updateData,
+          //     updated_at: new Date().toISOString(),
+          //   },
           // });
         } catch (error) {
           runtime.summary.errors++;
@@ -401,6 +412,12 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
 
   const eventType = String(event.type || "").toUpperCase();
   const productId = String(event.new_product_id || event.product_id || "");
+  const productCandidates = [
+    event.new_product_id,
+    event.product_id,
+    event.entitlement_id,
+    ...(Array.isArray(event.entitlement_ids) ? event.entitlement_ids : []),
+  ];
   const transactionId = String(
     event.original_transaction_id || event.transaction_id || ""
   );
@@ -432,6 +449,13 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
       /^(vip|vvip)([_-]|$)/i.test(productId.split(":").pop() || "")
     );
 
+  if (
+    eventType === "NON_RENEWING_PURCHASE" ||
+    productCandidates.some(isOneTimeProductId)
+  ) {
+    return { ok: false, reason: "RevenueCat event is one-time purchase" };
+  }
+
   if (!hasRevenueCatSource && !hasRevenueCatFields) {
     return { ok: false, reason: "not RevenueCat subscription shape" };
   }
@@ -460,6 +484,12 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
     event,
     platform,
   };
+}
+
+function isOneTimeProductId(value) {
+  const normalizedValue = normalizeIapTierId(value);
+
+  return /(^|-)one-?time($|-)/.test(normalizedValue);
 }
 
 // Build the same native-iap payload shape used by the existing iOS/Android scripts.

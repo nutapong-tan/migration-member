@@ -33,12 +33,16 @@ The write target is `members-migration`, using the original member `_id` as the
 document id so reruns replace the same migration document instead of creating
 duplicates.
 
+There is also a commented stage-3 draft for the final `members` update. Keep it
+commented until the logs and `members-migration` documents are verified.
+
 ## Structure
 
 ```text
 migration-member/
   scripts/
     revenuecat-native-iap-migration.js
+    members-migration-subscription.js
   .env.uat
   .env.prod
   run.sh
@@ -49,10 +53,20 @@ They can be run with this pattern:
 
 ```bash
 ./run.sh sync:<script-name>:prod
+./run.sh test:<script-name>:prod
 ```
 
-For this migration, `revenuecat-native` maps to
+For this migration, `revenuecat` maps to
 `scripts/revenuecat-native-iap-migration.js`.
+
+`subscription` maps to `scripts/members-migration-subscription.js` and validates the migrated documents in
+`members-migration` by comparing:
+
+- `subscription_plan` parsed as native IAP
+- `ref_subscription_plan` parsed as RevenueCat
+
+The compared result follows the get-member-info subscription shape:
+`isActive`, `entitlementId`, and `expiresDate`.
 
 ## Setup
 
@@ -123,20 +137,34 @@ pnpm run check
 Run UAT:
 
 ```bash
-pnpm run sync:revenuecat-native:uat
+pnpm run sync:revenuecat:uat
 ```
 
 Run PROD:
 
 ```bash
-pnpm run sync:revenuecat-native:prod
+pnpm run sync:revenuecat:prod
+```
+
+Validate `members-migration` UAT:
+
+```bash
+pnpm run test:subscription:uat
+```
+
+Validate `members-migration` PROD:
+
+```bash
+pnpm run test:subscription:prod
 ```
 
 Equivalent shell runner:
 
 ```bash
-./run.sh sync:revenuecat-native:uat
-./run.sh sync:revenuecat-native:prod
+./run.sh sync:revenuecat:uat
+./run.sh sync:revenuecat:prod
+./run.sh test:subscription:uat
+./run.sh test:subscription:prod
 ./run.sh check
 ```
 

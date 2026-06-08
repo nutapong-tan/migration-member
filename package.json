@@ -4,8 +4,10 @@
   "private": true,
   "description": "One-time member subscription migration scripts",
   "scripts": {
-    "sync:revenuecat-native:uat": "node scripts/revenuecat-native-iap-migration.js --env=uat",
-    "sync:revenuecat-native:prod": "node scripts/revenuecat-native-iap-migration.js --env=prod",
+    "sync:revenuecat:uat": "node scripts/revenuecat-native-iap-migration.js --env=uat",
+    "sync:revenuecat:prod": "node scripts/revenuecat-native-iap-migration.js --env=prod",
+    "test:subscription:uat": "node scripts/members-migration-subscription.js --env=uat",
+    "test:subscription:prod": "node scripts/members-migration-subscription.js --env=prod",
     "check": "for file in scripts/*.js; do node --check \"$file\"; done"
   },
   "dependencies": {

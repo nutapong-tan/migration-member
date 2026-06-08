@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-command_name="${1:-sync:revenuecat-native:uat}"
+command_name="${1:-sync:revenuecat:uat}"
 
 if [[ "$command_name" == "check" ]]; then
   for file in scripts/*.js; do
@@ -14,21 +14,24 @@ fi
 
 IFS=":" read -r command_prefix script_name script_env <<< "$command_name"
 
-if [[ "$command_prefix" != "sync" ]]; then
+if [[ "$command_prefix" != "sync" && "$command_prefix" != "test" ]]; then
   echo "Invalid command: ${command_prefix:-}"
-  echo "Use sync. Example: sync:revenuecat-native:uat"
+  echo "Use sync or test. Example: sync:revenuecat:uat"
   exit 1
 fi
 
 if [[ "$script_env" != "uat" && "$script_env" != "prod" ]]; then
   echo "Invalid env: ${script_env:-}"
-  echo "Use uat or prod. Example: sync:revenuecat-native:prod"
+  echo "Use uat or prod. Example: test:subscription:prod"
   exit 1
 fi
 
 case "$script_name" in
-  revenuecat-native)
+  revenuecat)
     script_file="revenuecat-native-iap-migration.js"
+    ;;
+  subscription)
+    script_file="members-migration-subscription.js"
     ;;
   *)
     script_file="${script_name}.js"
