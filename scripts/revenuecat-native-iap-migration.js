@@ -133,16 +133,16 @@ async function main() {
           // Stage 2 draft: after log validation, uncomment this block to copy
           // the full member document into members-migration without touching members.
           // The old values stay in ref_* fields for rollback tracing.
-          const migrationDocument = buildMigrationDocument(
-            member,
-            updateData,
-            new Date().toISOString()
-          );
-          await runtime.esClient.index({
-            index: MEMBER_MIGRATION_INDEX,
-            id: member._id,
-            document: migrationDocument,
-          });
+          // const migrationDocument = buildMigrationDocument(
+          //   member,
+          //   updateData,
+          //   new Date().toISOString()
+          // );
+          // await runtime.esClient.index({
+          //   index: MEMBER_MIGRATION_INDEX,
+          //   id: member._id,
+          //   document: migrationDocument,
+          // });
 
           // Stage 3 draft: final update back into the real members index.
           // Keep this commented until logs and members-migration documents are verified.
