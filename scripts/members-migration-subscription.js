@@ -2,8 +2,15 @@
 
 const fs = require("fs");
 const path = require("path");
+const axios = require("axios");
 const dotenv = require("dotenv");
+const jwt = require("jsonwebtoken");
 const { Client } = require("@elastic/elasticsearch");
+const { google } = require("googleapis");
+const {
+  Environment,
+  SignedDataVerifier,
+} = require("@apple/app-store-server-library");
 
 const JOB_NAME = "ValidateMembersMigrationSubscription";
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -11,185 +18,361 @@ const MEMBER_MIGRATION_INDEX = "members-migration";
 const SCROLL_KEEP_ALIVE = "2m";
 const BATCH_SIZE = 100;
 const EXPIRES_DATE_TOLERANCE_MS = 2_000;
+const DEFAULT_ANDROID_PACKAGE_NAME = "com.bessoga.reelike.android";
 
 process.chdir(PROJECT_ROOT);
 
 async function main() {
   loadEnvContext();
   const runtime = createRuntime();
+
+  await runValidation(runtime);
+  logSummary(runtime.summary);
+}
+
+async function runValidation(runtime) {
   let scrollId;
 
   try {
-    const firstPage = await runtime.esClient.search({
-      index: MEMBER_MIGRATION_INDEX,
-      scroll: SCROLL_KEEP_ALIVE,
-      size: BATCH_SIZE,
-      _source: [
-        "member_id",
-        "tier",
-        "ref_tier",
-        "subscription_plan",
-        "ref_subscription_plan",
-        "sync_date",
-      ],
-      body: {
-        query: {
-          bool: {
-            filter: [
-              { exists: { field: "subscription_plan" } },
-              { exists: { field: "ref_subscription_plan" } },
-            ],
-            must_not: [
-              { term: { "subscription_plan.keyword": "" } },
-              { term: { "ref_subscription_plan.keyword": "" } },
-            ],
-          },
-        },
-      },
-    });
+    const firstPage = await searchMigrationMembers(runtime);
 
     scrollId = firstPage._scroll_id;
-    let hits = firstPage.hits?.hits || [];
+    let hits = getPageHits(firstPage);
 
     while (hits.length > 0) {
-      for (const hit of hits) {
-        runtime.summary.scanned++;
-
-        const member = {
-          _id: hit._id,
-          ...(hit._source || {}),
-        };
-        const memberLabel = member.member_id || member._id;
-
-        try {
-          const nativeResult = getNativeIapSubscriptionFromMemberInfo(
-            member.subscription_plan
-          );
-          const revenueCatResult = getRevenueCatSubscriptionFromMemberInfo(
-            member.ref_subscription_plan
-          );
-
-          const nativePlan = parseJsonValue(member.subscription_plan);
-          const nativePlatform = getNativePlatform(nativePlan);
-          runtime.summary.by_platform[nativePlatform] =
-            (runtime.summary.by_platform[nativePlatform] || 0) + 1;
-
-          if (!nativeResult.isNativeIap) {
-            skip(runtime, "subscription_plan is not native-iap");
-            logMemberResult({
-              member: memberLabel,
-              result: "skipped",
-              reason: "subscription_plan is not native-iap",
-            });
-            continue;
-          }
-
-          if (!revenueCatResult.isRevenueCat) {
-            skip(runtime, "ref_subscription_plan is not RevenueCat");
-            logMemberResult({
-              member: memberLabel,
-              result: "skipped",
-              reason: "ref_subscription_plan is not RevenueCat",
-            });
-            continue;
-          }
-
-          runtime.summary.checked++;
-          const comparison = compareSubscriptionResults(
-            nativeResult.value,
-            revenueCatResult.value
-          );
-
-          updateActiveStateSummary(
-            runtime.summary,
-            nativeResult.value,
-            revenueCatResult.value
-          );
-
-          logMemberResult({
-            member: memberLabel,
-            result: comparison.isMatch ? "match" : "mismatch",
-            diff: comparison.diff,
-          });
-
-          if (comparison.isMatch) {
-            runtime.summary.matched++;
-            continue;
-          }
-
-          runtime.summary.mismatched++;
-          for (const field of Object.keys(comparison.diff)) {
-            runtime.summary.mismatch_fields[field] =
-              (runtime.summary.mismatch_fields[field] || 0) + 1;
-          }
-        } catch (error) {
-          runtime.summary.errors++;
-          logMemberResult({
-            member: memberLabel,
-            result: "error",
-            error: serializeError(error),
-          });
-        }
-      }
+      await processMigrationBatch(runtime, hits);
 
       if (!scrollId) {
         break;
       }
 
-      const nextPage = await runtime.esClient.scroll({
-        scroll_id: scrollId,
-        scroll: SCROLL_KEEP_ALIVE,
-      });
+      const nextPage = await scrollMigrationMembers(runtime, scrollId);
       scrollId = nextPage._scroll_id;
-      hits = nextPage.hits?.hits || [];
+      hits = getPageHits(nextPage);
     }
   } finally {
-    if (scrollId) {
-      await runtime.esClient.clearScroll({ scroll_id: scrollId }).catch((error) => {
-        logMemberResult({
-          member: null,
-          result: "error",
-          error: serializeError(error),
-        });
-      });
-    }
+    await clearMigrationScroll(runtime, scrollId);
   }
 }
 
-function createRuntime() {
-  const esClient =
-    process.env.ELASTICSEARCH_CLOUD_ID && process.env.ELASTICSEARCH_API_KEY
-      ? new Client({
-          requestTimeout: 300000,
-          maxRetries: 3,
-          cloud: { id: requiredEnv("ELASTICSEARCH_CLOUD_ID") },
-          auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
-        })
-      : new Client({
-          requestTimeout: 300000,
-          maxRetries: 3,
-          node: requiredEnv("ELASTICSEARCH_HOST"),
-        });
-
-  return {
-    esClient,
-    summary: {
-      scanned: 0,
-      checked: 0,
-      matched: 0,
-      mismatched: 0,
-      skipped: 0,
-      errors: 0,
-      by_platform: {},
-      by_active_state: {
-        both_active: 0,
-        both_inactive: 0,
-        native_only_active: 0,
-        revenue_cat_only_active: 0,
+async function searchMigrationMembers(runtime) {
+  return runtime.esClient.search({
+    index: MEMBER_MIGRATION_INDEX,
+    scroll: SCROLL_KEEP_ALIVE,
+    size: BATCH_SIZE,
+    _source: [
+      "member_id",
+      "tier",
+      "ref_tier",
+      "subscription_plan",
+      "ref_subscription_plan",
+      "sync_date",
+    ],
+    body: {
+      query: {
+        bool: {
+          filter: [
+            { exists: { field: "subscription_plan" } },
+            { exists: { field: "ref_subscription_plan" } },
+          ],
+          must_not: [
+            { term: { "subscription_plan.keyword": "" } },
+            { term: { "ref_subscription_plan.keyword": "" } },
+          ],
+        },
       },
-      skipped_reasons: {},
-      mismatch_fields: {},
     },
+  });
+}
+
+async function scrollMigrationMembers(runtime, scrollId) {
+  return runtime.esClient.scroll({
+    scroll_id: scrollId,
+    scroll: SCROLL_KEEP_ALIVE,
+  });
+}
+
+async function clearMigrationScroll(runtime, scrollId) {
+  if (!scrollId) {
+    return;
+  }
+
+  await runtime.esClient.clearScroll({ scroll_id: scrollId }).catch((error) => {
+    logMemberResult({
+      member: null,
+      result: "error",
+      error: serializeError(error),
+    });
+  });
+}
+
+function getPageHits(page) {
+  return page.hits?.hits || [];
+}
+
+async function processMigrationBatch(runtime, hits) {
+  for (const hit of hits) {
+    await processMigrationMember(runtime, hit);
+  }
+}
+
+async function processMigrationMember(runtime, hit) {
+  runtime.summary.scanned++;
+
+  const member = normalizeMigrationHit(hit);
+  const memberLabel = member.member_id || member._id;
+
+  try {
+    const subscriptionPair = parseMigrationSubscriptionPair(member);
+    const skipReason = getSubscriptionSkipReason(subscriptionPair);
+
+    if (skipReason) {
+      logMemberResult({
+        member: memberLabel,
+        result: "skipped",
+        reason: skipReason,
+      });
+      return;
+    }
+
+    await validateSubscriptionPair(runtime, memberLabel, subscriptionPair);
+  } catch (error) {
+    logMemberResult({
+      member: memberLabel,
+      result: "error",
+      error: serializeError(error),
+    });
+  }
+}
+
+function normalizeMigrationHit(hit) {
+  return {
+    _id: hit._id,
+    ...(hit._source || {}),
+  };
+}
+
+function parseMigrationSubscriptionPair(member) {
+  return {
+    native: getNativeIapSubscriptionFromMemberInfo(member.subscription_plan),
+    revenueCat: getRevenueCatSubscriptionFromMemberInfo(
+      member.ref_subscription_plan
+    ),
+  };
+}
+
+function getSubscriptionSkipReason(subscriptionPair) {
+  if (!subscriptionPair.native.isNativeIap) {
+    return "subscription_plan is not native-iap";
+  }
+
+  if (!subscriptionPair.revenueCat.isRevenueCat) {
+    return "ref_subscription_plan is not RevenueCat";
+  }
+
+  return null;
+}
+
+async function validateSubscriptionPair(runtime, memberLabel, subscriptionPair) {
+  runtime.summary.checked++;
+
+  const comparison = compareSubscriptionResults(
+    subscriptionPair.native.value,
+    subscriptionPair.revenueCat.value
+  );
+
+  if (comparison.isMatch) {
+    recordMemberMatch(runtime, memberLabel, "match");
+    return;
+  }
+
+  await resolveMismatchWithRevenueInquiry(
+    runtime,
+    memberLabel,
+    subscriptionPair
+  );
+}
+
+async function resolveMismatchWithRevenueInquiry(
+  runtime,
+  memberLabel,
+  subscriptionPair
+) {
+  const inquiryComparison = await compareWithRevenueCatInquiry(
+    runtime,
+    subscriptionPair.native.value,
+    subscriptionPair.revenueCat
+  );
+
+  if (inquiryComparison.status === "match") {
+    recordMemberMatch(runtime, memberLabel, "match-after-revenue-inquiry");
+    return;
+  }
+
+  runtime.summary.mismatched++;
+
+  if (inquiryComparison.status === "mismatch") {
+    logMemberResult({
+      member: memberLabel,
+      result: "mismatch-after-revenue-inquiry",
+      diff: inquiryComparison.diff,
+    });
+    return;
+  }
+
+  logMemberResult({
+    member: memberLabel,
+    result: `revenue-inquiry-${inquiryComparison.status}`,
+    reason: inquiryComparison.reason,
+    error: inquiryComparison.error,
+  });
+}
+
+function recordMemberMatch(runtime, memberLabel, result) {
+  runtime.summary.matched++;
+  logMemberResult({
+    member: memberLabel,
+    result,
+  });
+}
+
+function createRuntime() {
+  return {
+    esClient: createElasticsearchClient(),
+    summary: createSummary(),
+    appleEnv: process.env.APPLE_ENV || "PRODUCTION",
+    androidPackageName:
+      process.env.ANDROID_PACKAGE_NAME || DEFAULT_ANDROID_PACKAGE_NAME,
+    getAppleContext: createAppleContextGetter(),
+    getAndroidPublisher: createAndroidPublisherGetter(),
+  };
+}
+
+function createElasticsearchClient() {
+  if (process.env.ELASTICSEARCH_CLOUD_ID && process.env.ELASTICSEARCH_API_KEY) {
+    return new Client({
+      requestTimeout: 300000,
+      maxRetries: 3,
+      cloud: { id: requiredEnv("ELASTICSEARCH_CLOUD_ID") },
+      auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
+    });
+  }
+
+  return new Client({
+    requestTimeout: 300000,
+    maxRetries: 3,
+    node: requiredEnv("ELASTICSEARCH_HOST"),
+  });
+}
+
+function createSummary() {
+  return {
+    scanned: 0,
+    checked: 0,
+    matched: 0,
+    mismatched: 0,
+  };
+}
+
+function createAppleContextGetter() {
+  let appleContext = null;
+
+  return function getAppleContext() {
+    const shouldCreateToken =
+      !appleContext || appleContext.tokenExpiresAtMs < Date.now() + 60_000;
+    if (!shouldCreateToken) {
+      return appleContext;
+    }
+
+    const environmentName =
+      this.appleEnv === "PRODUCTION" ? "PRODUCTION" : "SANDBOX";
+    const environment =
+      environmentName === "PRODUCTION"
+        ? Environment.PRODUCTION
+        : Environment.SANDBOX;
+    const baseUrl =
+      environmentName === "PRODUCTION"
+        ? "https://api.storekit.apple.com"
+        : "https://api.storekit-sandbox.apple.com";
+    const bundleId = requiredEnv("APPLE_BUNDLE_ID");
+    const appAppleId =
+      environmentName === "PRODUCTION"
+        ? Number(requiredEnv("APPLE_APPLE_ID"))
+        : undefined;
+
+    if (appAppleId !== undefined && !Number.isFinite(appAppleId)) {
+      throw new Error("APPLE_APPLE_ID must be a number");
+    }
+
+    const privateKey = fs.readFileSync(
+      resolvePath(requiredEnv("APPLE_PRIVATE_KEY_PATH")),
+      "utf8"
+    );
+    const rootCert = fs.readFileSync(
+      resolvePath(requiredEnv("APPLE_ROOT_CERT_PATH"))
+    );
+    const verifier = new SignedDataVerifier(
+      [rootCert],
+      process.env.APPLE_ENABLE_ONLINE_CHECKS?.toLowerCase() === "true",
+      environment,
+      bundleId,
+      appAppleId
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const expiresInSeconds = 20 * 60;
+    const token = jwt.sign(
+      {
+        iss: requiredEnv("APPLE_ISSUER_ID"),
+        iat: now,
+        exp: now + expiresInSeconds,
+        aud: "appstoreconnect-v1",
+        bid: bundleId,
+      },
+      privateKey,
+      {
+        algorithm: "ES256",
+        header: {
+          alg: "ES256",
+          kid: requiredEnv("APPLE_KEY_ID"),
+          typ: "JWT",
+        },
+      }
+    );
+
+    appleContext = {
+      baseUrl,
+      environmentName,
+      jwt: token,
+      tokenExpiresAtMs: (now + expiresInSeconds) * 1000,
+      verifier,
+    };
+
+    return appleContext;
+  };
+}
+
+function createAndroidPublisherGetter() {
+  let androidPublisher = null;
+
+  return function getAndroidPublisher() {
+    if (androidPublisher) {
+      return androidPublisher;
+    }
+
+    const serviceAccountPath = resolvePath(
+      requiredEnv("ANDROID_SERVICE_ACCOUNT_PATH")
+    );
+    if (!fs.existsSync(serviceAccountPath)) {
+      throw new Error(`Service account file not found: ${serviceAccountPath}`);
+    }
+
+    const auth = new google.auth.GoogleAuth({
+      keyFile: serviceAccountPath,
+      scopes: ["https://www.googleapis.com/auth/androidpublisher"],
+    });
+    androidPublisher = google.androidpublisher({ version: "v3", auth });
+
+    return androidPublisher;
   };
 }
 
@@ -201,6 +384,10 @@ function logMemberResult(payload) {
   }
 
   console.log(`${JOB_NAME}.result`, JSON.stringify(logPayload));
+}
+
+function logSummary(summary) {
+  console.log(`${JOB_NAME}.summary`, JSON.stringify(buildSummaryLog(summary)));
 }
 
 // This mirrors the native-iap part used by get member info.
@@ -234,6 +421,8 @@ function getRevenueCatSubscriptionFromMemberInfo(refSubscriptionPlan) {
 
   return {
     isRevenueCat: true,
+    event,
+    platform: getRevenueCatPlatform(event),
     value: parseRevenueCatSubscriptionPlan(event),
   };
 }
@@ -340,7 +529,11 @@ function parseRevenueCatSubscriptionPlan(event) {
   };
 }
 
-function compareSubscriptionResults(nativeResult, revenueCatResult) {
+function compareSubscriptionResults(
+  nativeResult,
+  revenueCatResult,
+  rightLabel = "revenue_cat"
+) {
   const normalizedNative = normalizeSubscriptionResult(nativeResult);
   const normalizedRevenueCat = normalizeSubscriptionResult(revenueCatResult);
   const diff = {};
@@ -349,7 +542,7 @@ function compareSubscriptionResults(nativeResult, revenueCatResult) {
     if (normalizedNative[field] !== normalizedRevenueCat[field]) {
       diff[field] = {
         native_iap: normalizedNative[field],
-        revenue_cat: normalizedRevenueCat[field],
+        [rightLabel]: normalizedRevenueCat[field],
       };
     }
   }
@@ -362,13 +555,275 @@ function compareSubscriptionResults(nativeResult, revenueCatResult) {
   ) {
     diff.expiresDate = {
       native_iap: normalizedNative.expiresDate,
-      revenue_cat: normalizedRevenueCat.expiresDate,
+      [rightLabel]: normalizedRevenueCat.expiresDate,
     };
   }
 
   return {
     isMatch: Object.keys(diff).length === 0,
     diff,
+  };
+}
+
+async function compareWithRevenueCatInquiry(runtime, nativeResult, revenueCatResult) {
+  if (!revenueCatResult.event) {
+    return {
+      status: "skipped",
+      reason: "RevenueCat event not found",
+    };
+  }
+
+  const platform =
+    revenueCatResult.platform || getRevenueCatPlatform(revenueCatResult.event);
+
+  if (!["ios", "android"].includes(platform)) {
+    return {
+      status: "skipped",
+      reason: "unsupported RevenueCat store",
+      platform: platform || "unknown",
+    };
+  }
+
+  try {
+    const refreshedNativePlan = await buildNativePlanFromRevenueCatEvent(
+      runtime,
+      platform,
+      revenueCatResult.event
+    );
+    const refreshedResult = parseNativeIapSubscriptionPlan(refreshedNativePlan);
+    const comparison = compareSubscriptionResults(
+      nativeResult,
+      refreshedResult,
+      "revenue_cat_inquiry"
+    );
+
+    return {
+      status: comparison.isMatch ? "match" : "mismatch",
+      platform,
+      value: normalizeSubscriptionResult(refreshedResult),
+      diff: comparison.diff,
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      platform,
+      error: serializeError(error),
+    };
+  }
+}
+
+async function buildNativePlanFromRevenueCatEvent(runtime, platform, event) {
+  if (platform === "ios") {
+    return buildIosNativePlanFromRevenueCatEvent(runtime, event);
+  }
+
+  return buildAndroidNativePlanFromRevenueCatEvent(runtime, event);
+}
+
+async function buildIosNativePlanFromRevenueCatEvent(runtime, event) {
+  const apple = runtime.getAppleContext();
+  const originalTransactionId = String(
+    event.original_transaction_id || event.transaction_id || ""
+  ).trim();
+
+  if (!originalTransactionId) {
+    throw new Error("RevenueCat iOS event missing original_transaction_id");
+  }
+
+  const response = await axios.get(
+    `${apple.baseUrl}/inApps/v1/subscriptions/${originalTransactionId}`,
+    {
+      headers: { Authorization: `Bearer ${apple.jwt}` },
+      timeout: 15000,
+    }
+  );
+  const statusResponse = response.data;
+  const groups = Array.isArray(statusResponse?.data) ? statusResponse.data : [];
+  const transactionGroups = groups.map((group) =>
+    Array.isArray(group?.lastTransactions) ? group.lastTransactions : []
+  );
+  const matchingGroup =
+    transactionGroups.find((transactions) =>
+      transactions.some(
+        (item) => item?.originalTransactionId === originalTransactionId
+      )
+    ) ||
+    transactionGroups.find((transactions) => transactions.length > 0) ||
+    [];
+  const latestTransaction =
+    matchingGroup.find((item) => item?.status === 1) ||
+    matchingGroup.find(
+      (item) => item?.originalTransactionId === originalTransactionId
+    ) ||
+    matchingGroup[0] ||
+    null;
+  const verifiedTransaction = latestTransaction?.signedTransactionInfo
+    ? await apple.verifier.verifyAndDecodeTransaction(
+        latestTransaction.signedTransactionInfo
+      )
+    : null;
+  const verifiedRenewalInfo = latestTransaction?.signedRenewalInfo
+    ? await apple.verifier.verifyAndDecodeRenewalInfo(
+        latestTransaction.signedRenewalInfo
+      )
+    : null;
+
+  if (!verifiedTransaction) {
+    throw new Error("Apple subscription response has no verified transaction");
+  }
+
+  return {
+    statusResponse,
+    latestTransaction,
+    verifiedTransaction,
+    verifiedRenewalInfo,
+    summary: {
+      status: latestTransaction?.status ?? null,
+      statusLabel:
+        {
+          1: "ACTIVE",
+          2: "EXPIRED",
+          3: "BILLING_RETRY",
+          4: "BILLING_GRACE_PERIOD",
+          5: "REVOKED",
+        }[latestTransaction?.status] || "UNKNOWN",
+      originalTransactionId:
+        latestTransaction?.originalTransactionId?.trim() ||
+        verifiedTransaction?.originalTransactionId?.trim() ||
+        null,
+      productId: verifiedTransaction?.productId?.trim() || null,
+      autoRenewProductId:
+        verifiedRenewalInfo?.autoRenewProductId?.trim() || null,
+      expiresDate: numberOrNull(verifiedTransaction?.expiresDate),
+      gracePeriodExpiresDate: numberOrNull(
+        verifiedRenewalInfo?.gracePeriodExpiresDate
+      ),
+      renewalDate: numberOrNull(verifiedRenewalInfo?.renewalDate),
+      autoRenewStatus: verifiedRenewalInfo?.autoRenewStatus ?? null,
+      appAccountToken:
+        verifiedRenewalInfo?.appAccountToken?.trim() ||
+        verifiedTransaction?.appAccountToken?.trim() ||
+        null,
+      environment:
+        verifiedRenewalInfo?.environment?.trim() ||
+        verifiedTransaction?.environment?.trim() ||
+        null,
+    },
+    type: "native-iap",
+    platform: "ios",
+  };
+}
+
+async function buildAndroidNativePlanFromRevenueCatEvent(runtime, event) {
+  const publisher = runtime.getAndroidPublisher();
+  const packageName = runtime.androidPackageName.trim();
+  const orderId = String(
+    event.original_transaction_id || event.transaction_id || ""
+  ).trim();
+  const webhookProductId = String(
+    event.new_product_id || event.product_id || ""
+  ).trim();
+  const [fallbackProductId, fallbackBasePlanId = null] =
+    webhookProductId.split(":");
+  let orderResponse = null;
+  let purchaseToken = String(
+    event.purchase_token || event.purchaseToken || ""
+  ).trim();
+
+  if (!packageName) {
+    throw new Error("Missing Android package name");
+  }
+
+  if (!purchaseToken) {
+    if (!orderId) {
+      throw new Error("RevenueCat Android event missing order id and purchase token");
+    }
+
+    orderResponse = (
+      await publisher.orders.get({
+        packageName,
+        orderId,
+      })
+    ).data;
+    purchaseToken = orderResponse?.purchaseToken || "";
+  }
+
+  if (!purchaseToken) {
+    throw new Error("Google order response has no purchaseToken");
+  }
+
+  const response = await publisher.purchases.subscriptionsv2.get({
+    packageName,
+    token: purchaseToken,
+  });
+  const googleResponse = response.data;
+  const lineItem = Array.isArray(googleResponse.lineItems)
+    ? googleResponse.lineItems[0]
+    : null;
+  const orderLineItem = Array.isArray(orderResponse?.lineItems)
+    ? orderResponse.lineItems[0]
+    : null;
+  const productId =
+    lineItem?.productId || orderLineItem?.productId || fallbackProductId || "";
+  const basePlanId =
+    lineItem?.offerDetails?.basePlanId ||
+    orderLineItem?.subscriptionDetails?.basePlanId ||
+    fallbackBasePlanId;
+  const expiresDate = lineItem?.expiryTime
+    ? new Date(lineItem.expiryTime).getTime()
+    : null;
+  const isAutoRenewEnabled = !!lineItem?.autoRenewingPlan?.autoRenewEnabled;
+  const isExpired =
+    googleResponse.subscriptionState === "SUBSCRIPTION_STATE_ACTIVE" &&
+    typeof expiresDate === "number" &&
+    expiresDate < Date.now();
+  const validGoogleStates = [
+    "SUBSCRIPTION_STATE_UNSPECIFIED",
+    "SUBSCRIPTION_STATE_PENDING",
+    "SUBSCRIPTION_STATE_ACTIVE",
+    "SUBSCRIPTION_STATE_PAUSED",
+    "SUBSCRIPTION_STATE_IN_GRACE_PERIOD",
+    "SUBSCRIPTION_STATE_ON_HOLD",
+    "SUBSCRIPTION_STATE_CANCELED",
+    "SUBSCRIPTION_STATE_EXPIRED",
+  ];
+  const statusLabel = isExpired
+    ? "SUBSCRIPTION_STATE_EXPIRED"
+    : validGoogleStates.includes(googleResponse.subscriptionState)
+      ? googleResponse.subscriptionState
+      : "UNKNOWN";
+
+  return {
+    verifiedTransaction: {
+      transactionId: purchaseToken,
+      productId,
+      purchaseDate: googleResponse.startTime
+        ? new Date(googleResponse.startTime).getTime()
+        : undefined,
+      type: "Auto-Renewable Subscription",
+      purchaseToken,
+      storefrontId: googleResponse.regionCode ?? undefined,
+    },
+    summary: {
+      status:
+        googleResponse.subscriptionState === "SUBSCRIPTION_STATE_ACTIVE" &&
+        !isExpired
+          ? 1
+          : 0,
+      statusLabel,
+      purchaseToken,
+      productId,
+      basePlanId,
+      autoRenewProductId: isAutoRenewEnabled ? productId : "",
+      expiresDate,
+      gracePeriodExpiresDate: null,
+      renewalDate: expiresDate,
+      autoRenewStatus: isAutoRenewEnabled ? 1 : 0,
+      appAccountToken: null,
+      environment: googleResponse.testPurchase ? "Sandbox" : "Production",
+    },
+    type: "native-iap",
+    platform: "android",
   };
 }
 
@@ -467,35 +922,44 @@ function getRevenueCatEvent(plan) {
   return event;
 }
 
-function getNativePlatform(plan) {
-  const platform = String(plan?.platform || "unknown").toLowerCase();
+function getRevenueCatPlatform(event) {
+  const store = String(event?.store || "").toUpperCase();
+  const transactionId = String(
+    event?.original_transaction_id || event?.transaction_id || ""
+  ).trim();
 
+  if (["APP_STORE", "MAC_APP_STORE"].includes(store)) {
+    return "ios";
+  }
+
+  if (["PLAY_STORE", "GOOGLE_PLAY"].includes(store)) {
+    return "android";
+  }
+
+  if (event?.purchase_token || event?.purchaseToken) {
+    return "android";
+  }
+
+  if (transactionId.startsWith("GPA.")) {
+    return "android";
+  }
+
+  if (/^\d+$/.test(transactionId)) {
+    return "ios";
+  }
+
+  const platform = String(event?.platform || "").toLowerCase();
   return ["ios", "android"].includes(platform) ? platform : "unknown";
 }
 
-function updateActiveStateSummary(summary, nativeResult, revenueCatResult) {
-  if (nativeResult.isActive && revenueCatResult.isActive) {
-    summary.by_active_state.both_active++;
-    return;
-  }
-
-  if (!nativeResult.isActive && !revenueCatResult.isActive) {
-    summary.by_active_state.both_inactive++;
-    return;
-  }
-
-  if (nativeResult.isActive) {
-    summary.by_active_state.native_only_active++;
-    return;
-  }
-
-  summary.by_active_state.revenue_cat_only_active++;
-}
-
-function skip(runtime, reason) {
-  runtime.summary.skipped++;
-  runtime.summary.skipped_reasons[reason] =
-    (runtime.summary.skipped_reasons[reason] || 0) + 1;
+function buildSummaryLog(summary) {
+  return {
+    result: "summary",
+    scanned: summary.scanned,
+    checked: summary.checked,
+    matched: summary.matched,
+    mismatched: summary.mismatched,
+  };
 }
 
 function normalizeIapProductId(value) {
@@ -597,6 +1061,12 @@ function resolveProjectPath(filePath) {
     : path.resolve(PROJECT_ROOT, filePath);
 }
 
+function resolvePath(filePath) {
+  return path.isAbsolute(filePath)
+    ? filePath
+    : resolveProjectPath(filePath);
+}
+
 function requiredEnv(name) {
   const value = process.env[name];
 
@@ -605,6 +1075,10 @@ function requiredEnv(name) {
   }
 
   return value;
+}
+
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function serializeError(error) {
