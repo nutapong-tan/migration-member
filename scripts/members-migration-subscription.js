@@ -182,7 +182,12 @@ async function validateSubscriptionPair(runtime, memberLabel, subscriptionPair) 
   );
 
   if (comparison.isMatch) {
-    recordMemberMatch(runtime, memberLabel, "match");
+    recordMemberMatch(
+      runtime,
+      memberLabel,
+      "match",
+      subscriptionPair.native.value
+    );
     return;
   }
 
@@ -205,7 +210,12 @@ async function resolveMismatchWithRevenueInquiry(
   );
 
   if (inquiryComparison.status === "match") {
-    recordMemberMatch(runtime, memberLabel, "match-after-revenue-inquiry");
+    recordMemberMatch(
+      runtime,
+      memberLabel,
+      "match-after-inquiry",
+      subscriptionPair.native.value
+    );
     return;
   }
 
@@ -228,11 +238,12 @@ async function resolveMismatchWithRevenueInquiry(
   });
 }
 
-function recordMemberMatch(runtime, memberLabel, result) {
+function recordMemberMatch(runtime, memberLabel, result, subscriptionResult) {
   runtime.summary.matched++;
   logMemberResult({
     member: memberLabel,
     result,
+    is_active: subscriptionResult?.isActive === true,
   });
 }
 

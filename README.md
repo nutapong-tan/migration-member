@@ -71,7 +71,7 @@ For this migration, `revenuecat` maps to
 When those two values do not match, the checker uses only the RevenueCat-side
 `ref_subscription_plan` payload to inquiry Apple/Google again, then compares
 that latest inquiry result against the migrated native IAP value. If this second
-comparison matches, the result is logged as `match-after-revenue-inquiry`.
+comparison matches, the result is logged as `match-after-inquiry`.
 The final summary is logged with the `ValidateMembersMigrationSubscription.summary`
 tag.
 
