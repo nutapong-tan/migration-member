@@ -18,7 +18,7 @@ const MEMBER_INDEX = "members";
 const MEMBER_MIGRATION_INDEX = "members-migration";
 const SYSTEM_CONFIG_INDEX = "system_configs";
 const SCROLL_KEEP_ALIVE = "2m";
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 999;
 const DEFAULT_ANDROID_PACKAGE_NAME = "com.bessoga.reelike.android";
 
 process.chdir(PROJECT_ROOT);
