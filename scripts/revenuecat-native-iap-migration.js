@@ -119,12 +119,7 @@ async function main() {
           );
 
           // Step 5: Log only the exact member fields that would be stored in DB.
-          const updateData = buildUpdateData(
-            runtime,
-            member,
-            parsed.event,
-            nativePlan
-          );
+          const updateData = buildUpdateData(runtime, nativePlan);
 
           runtime.summary.mapped++;
           runtime.summary.by_platform[parsed.platform]++;
@@ -698,49 +693,10 @@ async function buildNativePlan(runtime, platform, event) {
   };
 }
 
-// Map product/entitlement candidates into the tier and subscription_plan update.
-function buildUpdateData(runtime, member, event, nativePlan) {
-  const tierCandidates = [];
-
-  if (Array.isArray(event.entitlement_ids)) {
-    tierCandidates.push(...event.entitlement_ids);
-  }
-
-  tierCandidates.push(
-    event.entitlement_id,
-    event.new_product_id,
-    event.product_id,
-    nativePlan?.summary?.basePlanId,
-    nativePlan?.summary?.productId,
-    nativePlan?.summary?.autoRenewProductId
-  );
-
-  const tierPriority = {};
-  let priority = 0;
-  for (const [, config] of Object.entries(runtime.memberTiers || {})) {
-    if (config?.label) {
-      tierPriority[config.label] = priority++;
-    }
-  }
-
-  let resolvedTier = null;
-  let resolvedPriority = -1;
-  for (const candidate of tierCandidates.filter(Boolean)) {
-    const rawValue = String(candidate).trim();
-    const normalizedValue = normalizeIapTierId(rawValue);
-    const matchedTier =
-      runtime.memberTiers?.[rawValue]?.label ||
-      runtime.memberTiers?.[normalizedValue]?.label ||
-      (tierPriority[rawValue] !== undefined ? rawValue : null) ||
-      (tierPriority[normalizedValue] !== undefined ? normalizedValue : null);
-
-    if (matchedTier && tierPriority[matchedTier] > resolvedPriority) {
-      resolvedTier = matchedTier;
-      resolvedPriority = tierPriority[matchedTier];
-    }
-  }
-
+// Update tier only from the active native subscription returned by Apple/Google.
+function buildUpdateData(runtime, nativePlan) {
   const updateData = {};
+  const resolvedTier = resolveActiveNativePlanTier(runtime, nativePlan);
 
   if (resolvedTier) {
     updateData.tier = resolvedTier;
@@ -749,6 +705,82 @@ function buildUpdateData(runtime, member, event, nativePlan) {
   updateData.subscription_plan = JSON.stringify(nativePlan);
 
   return updateData;
+}
+
+function resolveActiveNativePlanTier(runtime, nativePlan) {
+  if (!isNativePlanActive(nativePlan)) {
+    return null;
+  }
+
+  return resolveTierFromCandidates(
+    runtime.memberTiers,
+    getNativePlanTierCandidates(nativePlan)
+  );
+}
+
+function isNativePlanActive(nativePlan) {
+  const summary = nativePlan?.summary || {};
+  const statusLabel = String(summary.statusLabel || "").toUpperCase();
+
+  return summary.status === 1 || statusLabel === "ACTIVE";
+}
+
+function getNativePlanTierCandidates(nativePlan) {
+  const summary = nativePlan?.summary || {};
+
+  if (nativePlan?.platform === "android") {
+    return [
+      summary.basePlanId,
+      summary.productId,
+      summary.autoRenewProductId,
+    ];
+  }
+
+  return [
+    summary.productId,
+    summary.autoRenewProductId,
+  ];
+}
+
+function resolveTierFromCandidates(memberTiers, candidates) {
+  const tierPriority = {};
+  const normalizedTierLabels = {};
+  let priority = 0;
+  for (const [key, config] of Object.entries(memberTiers || {})) {
+    if (config?.label) {
+      tierPriority[config.label] = priority++;
+      normalizedTierLabels[normalizeIapTierId(key)] = config.label;
+      normalizedTierLabels[normalizeIapTierId(config.label)] = config.label;
+    }
+  }
+
+  let resolvedTier = null;
+  let resolvedPriority = -1;
+  for (const candidate of candidates.filter(Boolean)) {
+    const rawValue = String(candidate).trim();
+    const normalizedValue = normalizeIapTierId(rawValue);
+    const matchedTier =
+      memberTiers?.[rawValue]?.label ||
+      memberTiers?.[normalizedValue]?.label ||
+      (tierPriority[rawValue] !== undefined ? rawValue : null) ||
+      (tierPriority[normalizedValue] !== undefined ? normalizedValue : null) ||
+      resolveTierByPrefix(normalizedTierLabels, normalizedValue);
+
+    if (matchedTier && tierPriority[matchedTier] > resolvedPriority) {
+      resolvedTier = matchedTier;
+      resolvedPriority = tierPriority[matchedTier];
+    }
+  }
+
+  return resolvedTier;
+}
+
+function resolveTierByPrefix(normalizedTierLabels, normalizedValue) {
+  const match = Object.entries(normalizedTierLabels).find(
+    ([normalizedTierId]) => normalizedValue.startsWith(normalizedTierId)
+  );
+
+  return match?.[1] || null;
 }
 
 function buildMigrationDocument(member, updateData, syncDate) {

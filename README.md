@@ -12,6 +12,9 @@ iOS/Android native in-app flows.
 - Converts every RevenueCat subscription payload it finds.
 - Calls Apple App Store Server API for iOS subscriptions.
 - Calls Google Android Publisher API for Android subscriptions.
+- Updates `tier` only from the active native subscription returned by
+  Apple/Google using the same `member_tiers` label/prefix mapping behavior as
+  `olst-ms-member`; inactive subscription results update `subscription_plan` only.
 - Logs only the exact member fields that would be saved:
 
 ```json
