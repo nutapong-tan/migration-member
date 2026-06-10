@@ -33,7 +33,6 @@ async function main() {
       scriptEnv: envContext.name,
       envFile: envContext.file,
       tag: runtime.tag,
-      mode: runtime.execute ? "execute" : "dry-run",
     })}`
   );
 
@@ -69,13 +68,13 @@ function createRuntime() {
   return {
     esClient: createElasticsearchClient(),
     tag: getArgValue("--tag"),
-    execute: hasFlag("--execute"),
     summary: {
       scanned: 0,
-      planned: 0,
       restored: 0,
+      deleted_migration_docs: 0,
       skipped: 0,
       errors: 0,
+      delete_errors: 0,
       skip_reasons: {},
       samples: [],
     },
@@ -162,17 +161,13 @@ async function processMigrationMember(runtime, hit) {
     return;
   }
 
-  summary.planned++;
   addSample(summary, {
     id: hit._id,
     member: memberLabel,
     tier: restoreData.doc.tier,
     has_subscription_plan: restoreData.doc.subscription_plan !== null,
+    will_delete_migration_doc: true,
   });
-
-  if (!runtime.execute) {
-    return;
-  }
 
   try {
     await runtime.esClient.update({
@@ -184,10 +179,28 @@ async function processMigrationMember(runtime, hit) {
       },
     });
     summary.restored++;
+    await deleteMigrationDocument(runtime, hit._id, memberLabel);
   } catch (error) {
     summary.errors++;
     console.log(
       `[${JOB_NAME}] member=${memberLabel} id=${hit._id} status=error ${JSON.stringify(
+        serializeError(error)
+      )}`
+    );
+  }
+}
+
+async function deleteMigrationDocument(runtime, id, memberLabel) {
+  try {
+    await runtime.esClient.delete({
+      index: MEMBER_MIGRATION_INDEX,
+      id,
+    });
+    runtime.summary.deleted_migration_docs++;
+  } catch (error) {
+    runtime.summary.delete_errors++;
+    console.log(
+      `[${JOB_NAME}] member=${memberLabel} id=${id} status=delete-migration-error ${JSON.stringify(
         serializeError(error)
       )}`
     );
@@ -257,12 +270,12 @@ function logSummary(runtime) {
   console.log(`${JOB_NAME}.summary`);
   console.log("");
   console.log(`tag: ${runtime.tag}`);
-  console.log(`mode: ${runtime.execute ? "execute" : "dry-run"}`);
   console.log(`scanned migration docs: ${summary.scanned}`);
-  console.log(`planned restores: ${summary.planned}`);
   console.log(`restored to members: ${summary.restored}`);
+  console.log(`deleted migration docs: ${summary.deleted_migration_docs}`);
   console.log(`skipped: ${summary.skipped}`);
   console.log(`errors: ${summary.errors}`);
+  console.log(`delete errors: ${summary.delete_errors}`);
 
   if (Object.keys(summary.skip_reasons).length > 0) {
     console.log("");
@@ -270,22 +283,6 @@ function logSummary(runtime) {
     for (const [reason, count] of sortCounts(summary.skip_reasons)) {
       console.log(`- ${reason}: ${count}`);
     }
-  }
-
-  if (summary.samples.length > 0) {
-    console.log("");
-    console.log("samples");
-    for (const sample of summary.samples) {
-      const status = sample.skipped ? ` skipped=${sample.skipped}` : "";
-      console.log(
-        `- member=${sample.member} id=${sample.id}${status} tier=${sample.tier ?? "null"} has_subscription_plan=${sample.has_subscription_plan ?? "n/a"}`
-      );
-    }
-  }
-
-  if (!runtime.execute) {
-    console.log("");
-    console.log("dry-run only. Add --execute to write these values back to members.");
   }
 }
 
@@ -333,10 +330,6 @@ function getArgValue(name) {
   const arg = process.argv.find((item) => item.startsWith(prefix));
 
   return arg ? arg.slice(prefix.length) : null;
-}
-
-function hasFlag(name) {
-  return process.argv.includes(name) || getArgValue(name) === "true";
 }
 
 function normalizeScriptEnv(value) {

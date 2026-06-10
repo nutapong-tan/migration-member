@@ -50,16 +50,9 @@ migration-member/
     members-migration-subscription.js
   .env.uat
   .env.prod
-  run.sh
 ```
 
 Add future scripts under `scripts/<script-name>.js`.
-They can be run with this pattern:
-
-```bash
-./run.sh sync:<script-name>:prod
-./run.sh test:<script-name>:prod
-```
 
 For this migration, `revenuecat` maps to
 `scripts/revenuecat-native-iap-migration.js`.
@@ -180,7 +173,7 @@ pnpm run report:member-types:prod
 The report scans current `members` documents that have `subscription_plan`, then
 groups them into `revenuecat`, `native-iap`, `miniapp`, `unknown`, plus
 empty/invalid JSON counts. Add `--include-missing`, `--active-only`, or
-`--untransferred-only` to the direct node command if you want to adjust the scan.
+`--untransferred-only` after `--` if you want to adjust the scan.
 Use `--details=revenuecat` to list the remaining RevenueCat documents, or
 `--json` to print the raw JSON summary.
 
@@ -191,41 +184,10 @@ pnpm run revert:members:uat -- --tag=20260610-153012
 pnpm run revert:members:prod -- --tag=20260610-153012
 ```
 
-The revert command is dry-run by default. It reads `members-migration` documents
-with the given `tag`, then plans to restore `members.tier` from `ref_tier` and
-`members.subscription_plan` from `ref_subscription_plan`. Add `--execute` only
-after checking the dry-run output:
-
-```bash
-pnpm run revert:members:uat -- --tag=20260610-153012 --execute
-```
-
-Equivalent shell runner:
-
-```bash
-./run.sh sync:revenuecat:uat
-./run.sh sync:revenuecat:prod
-./run.sh test:subscription:uat
-./run.sh test:subscription:prod
-./run.sh report:member-types:uat
-./run.sh report:member-types:prod
-./run.sh revert:members:uat --tag=20260610-153012
-./run.sh revert:members:prod --tag=20260610-153012
-./run.sh check
-```
-
-Direct node commands:
-
-```bash
-node scripts/revenuecat-native-iap-migration.js --env=uat
-node scripts/revenuecat-native-iap-migration.js --env=prod
-node scripts/revenuecat-native-iap-migration.js --env-file=.env.uat
-node scripts/member-subscription-type-report.js --env=uat --active-only --untransferred-only
-node scripts/member-subscription-type-report.js --env=uat --include-missing
-node scripts/member-subscription-type-report.js --env=uat --details=revenuecat
-node scripts/revert-members-from-migration-tag.js --env=uat --tag=20260610-153012
-node scripts/revert-members-from-migration-tag.js --env=uat --tag=20260610-153012 --execute
-```
+The revert command reads `members-migration` documents with the given `tag`,
+restores `members.tier` from `ref_tier`, restores `members.subscription_plan`
+from `ref_subscription_plan`, and deletes each successfully restored
+`members-migration` document.
 
 Every run writes mapped documents to `members-migration`. The script does not
 update the real `members` index.
