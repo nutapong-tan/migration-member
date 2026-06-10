@@ -8,6 +8,10 @@
     "sync:revenuecat:prod": "node scripts/revenuecat-native-iap-migration.js --env=prod",
     "test:subscription:uat": "node scripts/members-migration-subscription.js --env=uat",
     "test:subscription:prod": "node scripts/members-migration-subscription.js --env=prod",
+    "report:member-types:uat": "node scripts/member-subscription-type-report.js --env=uat",
+    "report:member-types:prod": "node scripts/member-subscription-type-report.js --env=prod",
+    "revert:members:uat": "node scripts/revert-members-from-migration-tag.js --env=uat",
+    "revert:members:prod": "node scripts/revert-members-from-migration-tag.js --env=prod",
     "check": "for file in scripts/*.js; do node --check \"$file\"; done"
   },
   "dependencies": {

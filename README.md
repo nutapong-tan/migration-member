@@ -6,7 +6,7 @@ iOS/Android native in-app flows.
 
 ## What It Does
 
-- Reads active `members` from Elasticsearch.
+- Reads all `members` that have `subscription_plan` from Elasticsearch.
 - Skips records already using `type: "native-iap"`.
 - Skips miniapp and non-renewing purchase payloads.
 - Converts every RevenueCat subscription payload it finds.
@@ -170,6 +170,36 @@ Validate `members-migration` PROD:
 pnpm run test:subscription:prod
 ```
 
+Report current `members.subscription_plan` type counts:
+
+```bash
+pnpm run report:member-types:uat
+pnpm run report:member-types:prod
+```
+
+The report scans current `members` documents that have `subscription_plan`, then
+groups them into `revenuecat`, `native-iap`, `miniapp`, `unknown`, plus
+empty/invalid JSON counts. Add `--include-missing`, `--active-only`, or
+`--untransferred-only` to the direct node command if you want to adjust the scan.
+Use `--details=revenuecat` to list the remaining RevenueCat documents, or
+`--json` to print the raw JSON summary.
+
+Revert `members` values from a `members-migration` tag:
+
+```bash
+pnpm run revert:members:uat -- --tag=20260610-153012
+pnpm run revert:members:prod -- --tag=20260610-153012
+```
+
+The revert command is dry-run by default. It reads `members-migration` documents
+with the given `tag`, then plans to restore `members.tier` from `ref_tier` and
+`members.subscription_plan` from `ref_subscription_plan`. Add `--execute` only
+after checking the dry-run output:
+
+```bash
+pnpm run revert:members:uat -- --tag=20260610-153012 --execute
+```
+
 Equivalent shell runner:
 
 ```bash
@@ -177,6 +207,10 @@ Equivalent shell runner:
 ./run.sh sync:revenuecat:prod
 ./run.sh test:subscription:uat
 ./run.sh test:subscription:prod
+./run.sh report:member-types:uat
+./run.sh report:member-types:prod
+./run.sh revert:members:uat --tag=20260610-153012
+./run.sh revert:members:prod --tag=20260610-153012
 ./run.sh check
 ```
 
@@ -186,6 +220,11 @@ Direct node commands:
 node scripts/revenuecat-native-iap-migration.js --env=uat
 node scripts/revenuecat-native-iap-migration.js --env=prod
 node scripts/revenuecat-native-iap-migration.js --env-file=.env.uat
+node scripts/member-subscription-type-report.js --env=uat --active-only --untransferred-only
+node scripts/member-subscription-type-report.js --env=uat --include-missing
+node scripts/member-subscription-type-report.js --env=uat --details=revenuecat
+node scripts/revert-members-from-migration-tag.js --env=uat --tag=20260610-153012
+node scripts/revert-members-from-migration-tag.js --env=uat --tag=20260610-153012 --execute
 ```
 
 Every run writes mapped documents to `members-migration`. The script does not

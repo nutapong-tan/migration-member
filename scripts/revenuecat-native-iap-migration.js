@@ -64,7 +64,7 @@ async function main() {
   }
 
   try {
-    // Step 2: Scroll active members that still have a subscription_plan value.
+    // Step 2: Scroll every member that still has a subscription_plan value.
     const firstPage = await runtime.esClient.search({
       index: MEMBER_INDEX,
       scroll: SCROLL_KEEP_ALIVE,
@@ -72,11 +72,7 @@ async function main() {
       body: {
         query: {
           bool: {
-            filter: [
-              { term: { active: true } },
-              { term: { is_transferred: false } },
-              { exists: { field: "subscription_plan" } },
-            ],
+            filter: [{ exists: { field: "subscription_plan" } }],
             must_not: [{ term: { "subscription_plan.keyword": "" } }],
           },
         },
@@ -100,7 +96,7 @@ async function main() {
         runtime.summary.scanned++;
 
         try {
-          // Step 3: Keep every RevenueCat subscription payload; skip native, miniapp, and one-time items.
+          // Step 3: Keep every RevenueCat subscription payload; skip native, miniapp, and non-renewing items.
           const parsed = parseRevenueCatSubscriptionPlan(member.subscription_plan);
           if (!parsed.ok) {
             runtime.summary.skipped++;
@@ -410,12 +406,6 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
 
   const eventType = String(event.type || "").toUpperCase();
   const productId = String(event.new_product_id || event.product_id || "");
-  const productCandidates = [
-    event.new_product_id,
-    event.product_id,
-    event.entitlement_id,
-    ...(Array.isArray(event.entitlement_ids) ? event.entitlement_ids : []),
-  ];
   const transactionId = String(
     event.original_transaction_id || event.transaction_id || ""
   );
@@ -447,11 +437,8 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
       /^(vip|vvip)([_-]|$)/i.test(productId.split(":").pop() || "")
     );
 
-  if (
-    eventType === "NON_RENEWING_PURCHASE" ||
-    productCandidates.some(isOneTimeProductId)
-  ) {
-    return { ok: false, reason: "RevenueCat event is one-time purchase" };
+  if (eventType === "NON_RENEWING_PURCHASE") {
+    return { ok: false, reason: "RevenueCat event is non-renewing purchase" };
   }
 
   if (!hasRevenueCatSource && !hasRevenueCatFields) {
@@ -482,12 +469,6 @@ function parseRevenueCatSubscriptionPlan(subscriptionPlan) {
     event,
     platform,
   };
-}
-
-function isOneTimeProductId(value) {
-  const normalizedValue = normalizeIapTierId(value);
-
-  return /(^|-)one-?time($|-)/.test(normalizedValue);
 }
 
 // Build the same native-iap payload shape used by the existing iOS/Android scripts.

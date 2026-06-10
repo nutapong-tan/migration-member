@@ -14,9 +14,9 @@ fi
 
 IFS=":" read -r command_prefix script_name script_env <<< "$command_name"
 
-if [[ "$command_prefix" != "sync" && "$command_prefix" != "test" ]]; then
+if [[ "$command_prefix" != "sync" && "$command_prefix" != "test" && "$command_prefix" != "report" && "$command_prefix" != "revert" ]]; then
   echo "Invalid command: ${command_prefix:-}"
-  echo "Use sync or test. Example: sync:revenuecat:uat"
+  echo "Use sync, test, report, or revert. Example: revert:members:uat"
   exit 1
 fi
 
@@ -32,6 +32,16 @@ case "$script_name" in
     ;;
   subscription)
     script_file="members-migration-subscription.js"
+    ;;
+  member-types)
+    script_file="member-subscription-type-report.js"
+    ;;
+  members)
+    if [[ "$command_prefix" == "revert" ]]; then
+      script_file="revert-members-from-migration-tag.js"
+    else
+      script_file="${script_name}.js"
+    fi
     ;;
   *)
     script_file="${script_name}.js"
@@ -49,4 +59,4 @@ if [[ ! -f "$script_path" ]]; then
   exit 1
 fi
 
-node "$script_path" --env="$script_env"
+node "$script_path" --env="$script_env" "${@:2}"
