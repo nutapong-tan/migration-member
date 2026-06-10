@@ -37,7 +37,8 @@ async function main() {
       migrationIndex: MEMBER_MIGRATION_INDEX,
       batchSize: BATCH_SIZE,
       scriptEnv: envContext.name,
-      writeMode: "log-only",
+      migrationTag: runtime.migrationTag,
+      writeMode: "members-migration",
       envFile: envContext.file,
       appleEnv: runtime.appleEnv,
       androidPackageName: runtime.androidPackageName,
@@ -128,16 +129,17 @@ async function main() {
           // Stage 2 draft: after log validation, uncomment this block to copy
           // the full member document into members-migration without touching members.
           // The old values stay in ref_* fields for rollback tracing.
-          // const migrationDocument = buildMigrationDocument(
-          //   member,
-          //   updateData,
-          //   new Date().toISOString()
-          // );
-          // await runtime.esClient.index({
-          //   index: MEMBER_MIGRATION_INDEX,
-          //   id: member._id,
-          //   document: migrationDocument,
-          // });
+          const migrationDocument = buildMigrationDocument(
+            member,
+            updateData,
+            new Date().toISOString(),
+            runtime.migrationTag
+          );
+          await runtime.esClient.index({
+            index: MEMBER_MIGRATION_INDEX,
+            id: member._id,
+            document: migrationDocument,
+          });
 
           // Stage 3 draft: final update back into the real members index.
           // Keep this commented until logs and members-migration documents are verified.
@@ -215,6 +217,7 @@ function createRuntime() {
   return {
     esClient,
     summary,
+    migrationTag: buildDateTimeTag(new Date()),
     memberTiers: {},
     appleEnv: process.env.APPLE_ENV || "PRODUCTION",
     androidPackageName:
@@ -783,14 +786,32 @@ function resolveTierByPrefix(normalizedTierLabels, normalizedValue) {
   return match?.[1] || null;
 }
 
-function buildMigrationDocument(member, updateData, syncDate) {
+function buildMigrationDocument(member, updateData, syncDate, tag) {
   return {
     ...member.source,
     ...updateData,
     ref_tier: member.tier ?? null,
     ref_subscription_plan: member.subscription_plan ?? null,
     sync_date: syncDate,
+    tag,
   };
+}
+
+function buildDateTimeTag(date) {
+  const value = date instanceof Date ? date : new Date(date);
+  const pad = (number) => String(number).padStart(2, "0");
+  const datePart = [
+    value.getFullYear(),
+    pad(value.getMonth() + 1),
+    pad(value.getDate()),
+  ].join("");
+  const timePart = [
+    pad(value.getHours()),
+    pad(value.getMinutes()),
+    pad(value.getSeconds()),
+  ].join("");
+
+  return `${datePart}-${timePart}`;
 }
 
 function normalizeIapTierId(value) {
