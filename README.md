@@ -21,17 +21,19 @@ iOS/Android native in-app flows.
 {"tier":"vvip-annual","subscription_plan":"{\"type\":\"native-iap\",...}"}
 ```
 
-This project is currently log-only. It does not update Elasticsearch.
+This project writes mapped members into `members-migration` only. It does not
+update the real `members` index.
 
-There is a commented stage-2 draft in the script for writing mapped members into
-`members-migration`. When enabled later, it will copy the full member document,
-replace `tier` and `subscription_plan` with the mapped values, and add:
+The migration write copies the full member document, replaces `tier` and
+`subscription_plan` with the mapped values, and adds:
 
 - `ref_tier`
 - `ref_subscription_plan`
 - `sync_date`
+- `tag`
 
-That stage-2 write block is still commented out.
+The `tag` is built once per run from the local date and time in
+`YYYYMMDD-HHmmss` format.
 The write target is `members-migration`, using the original member `_id` as the
 document id so reruns replace the same migration document instead of creating
 duplicates.
@@ -186,8 +188,8 @@ node scripts/revenuecat-native-iap-migration.js --env=prod
 node scripts/revenuecat-native-iap-migration.js --env-file=.env.uat
 ```
 
-Every run is still log-only in this draft. The script does not update
-Elasticsearch.
+Every run writes mapped documents to `members-migration`. The script does not
+update the real `members` index.
 
 ## Output
 
