@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
-const path = require("path");
-const dotenv = require("dotenv");
-const { Client } = require("@elastic/elasticsearch");
+const {
+  PROJECT_ROOT,
+  getArgValue,
+  hasFlag,
+  loadEnvContext,
+} = require("../helpers/env");
+const { createElasticsearchClient } = require("../helpers/elasticsearch");
+const { serializeError } = require("../helpers/logging");
 
 const JOB_NAME = "ReportMemberSubscriptionPlanTypes";
-const PROJECT_ROOT = path.resolve(__dirname, "..");
 const MEMBER_INDEX = "members";
 const SCROLL_KEEP_ALIVE = "2m";
-const BATCH_SIZE = 1000;
+const SCROLL_PAGE_SIZE = 1000;
 
 process.chdir(PROJECT_ROOT);
 
@@ -23,7 +26,7 @@ async function main() {
     console.log(
       `[${JOB_NAME}] Config ${JSON.stringify({
         memberIndex: MEMBER_INDEX,
-        batchSize: BATCH_SIZE,
+        scrollPageSize: SCROLL_PAGE_SIZE,
         scriptEnv: envContext.name,
         envFile: envContext.file,
         filters: runtime.filters,
@@ -65,36 +68,6 @@ function createRuntime() {
     filters: createFilters(),
     summary: createSummary(),
   };
-}
-
-function createElasticsearchClient() {
-  if (process.env.ELASTICSEARCH_CLOUD_ID && process.env.ELASTICSEARCH_API_KEY) {
-    return new Client({
-      requestTimeout: 300000,
-      maxRetries: 3,
-      cloud: { id: requiredEnv("ELASTICSEARCH_CLOUD_ID") },
-      auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
-    });
-  }
-
-  if (process.env.ELASTICSEARCH_API_KEY) {
-    return new Client({
-      requestTimeout: 300000,
-      maxRetries: 3,
-      node: requiredEnv("ELASTICSEARCH_HOST"),
-      auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
-    });
-  }
-
-  return new Client({
-    requestTimeout: 300000,
-    maxRetries: 3,
-    node: requiredEnv("ELASTICSEARCH_HOST"),
-    auth: {
-      username: requiredEnv("ELASTICSEARCH_USERNAME"),
-      password: requiredEnv("ELASTICSEARCH_PASSWORD"),
-    },
-  });
 }
 
 function createFilters() {
@@ -150,7 +123,7 @@ function searchMembers(runtime) {
   return runtime.esClient.search({
     index: MEMBER_INDEX,
     scroll: SCROLL_KEEP_ALIVE,
-    size: BATCH_SIZE,
+    size: SCROLL_PAGE_SIZE,
     _source: ["member_id", "subscription_plan", "active", "is_transferred"],
     body: {
       query: buildQuery(runtime.filters),
@@ -483,9 +456,7 @@ function incrementCount(target, key) {
 }
 
 function addSample(samples, sample) {
-  if (samples.length < 5) {
-    samples.push(sample);
-  }
+  samples.push(sample);
 }
 
 async function clearScroll(runtime, scrollId) {
@@ -547,89 +518,6 @@ function sortCounts(counts) {
 
 function formatDetailValue(value) {
   return String(value || "missing").replace(/\s+/g, "_");
-}
-
-function loadEnvContext() {
-  const requestedEnv = normalizeScriptEnv(
-    getArgValue("--env") ||
-      process.env.SCRIPT_ENV ||
-      process.env.MIGRATION_ENV ||
-      "uat"
-  );
-  const explicitEnvFile = getArgValue("--env-file") || process.env.ENV_FILE;
-  const envFile = explicitEnvFile || `.env.${requestedEnv}`;
-  const envPath = resolveProjectPath(envFile);
-
-  if (path.basename(envPath) === ".env") {
-    throw new Error("Plain .env is not supported. Use .env.uat or .env.prod.");
-  }
-
-  if (!fs.existsSync(envPath)) {
-    throw new Error(
-      `Env file not found: ${envPath}. Create it from .env.example first.`
-    );
-  }
-
-  const result = dotenv.config({ path: envPath, override: true });
-  if (result.error) {
-    throw result.error;
-  }
-
-  return {
-    name: requestedEnv,
-    file: path.relative(PROJECT_ROOT, envPath),
-  };
-}
-
-function getArgValue(name) {
-  const prefix = `${name}=`;
-  const arg = process.argv.find((item) => item.startsWith(prefix));
-
-  return arg ? arg.slice(prefix.length) : null;
-}
-
-function hasFlag(name) {
-  return process.argv.includes(name) || getArgValue(name) === "true";
-}
-
-function normalizeScriptEnv(value) {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase();
-  const aliases = {
-    develop: "uat",
-    development: "uat",
-    local: "uat",
-    sandbox: "uat",
-    production: "prod",
-  };
-
-  return aliases[normalized] || normalized || "uat";
-}
-
-function resolveProjectPath(filePath) {
-  return path.isAbsolute(filePath)
-    ? filePath
-    : path.resolve(PROJECT_ROOT, filePath);
-}
-
-function requiredEnv(name) {
-  const value = process.env[name];
-
-  if (!value) {
-    throw new Error(`Missing env: ${name}`);
-  }
-
-  return value;
-}
-
-function serializeError(error) {
-  return {
-    status:
-      error.response?.status || error.code || error.meta?.statusCode || null,
-    data: error.response?.data || error.errors || error.meta?.body || null,
-    message: error.message || "Unknown error",
-  };
 }
 
 main().catch((error) => {

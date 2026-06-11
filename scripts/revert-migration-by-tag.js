@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
-const path = require("path");
-const dotenv = require("dotenv");
-const { Client } = require("@elastic/elasticsearch");
+const {
+  PROJECT_ROOT,
+  getArgValue,
+  loadEnvContext,
+} = require("../helpers/env");
+const { createElasticsearchClient } = require("../helpers/elasticsearch");
+const { serializeError } = require("../helpers/logging");
 
 const JOB_NAME = "RevertMembersFromMigrationTag";
-const PROJECT_ROOT = path.resolve(__dirname, "..");
 const MEMBER_INDEX = "members";
 const MEMBER_MIGRATION_INDEX = "members-migration";
 const SCROLL_KEEP_ALIVE = "2m";
-const BATCH_SIZE = 500;
+const SCROLL_PAGE_SIZE = 500;
 
 process.chdir(PROJECT_ROOT);
 
@@ -29,7 +31,7 @@ async function main() {
     `[${JOB_NAME}] Config ${JSON.stringify({
       memberIndex: MEMBER_INDEX,
       migrationIndex: MEMBER_MIGRATION_INDEX,
-      batchSize: BATCH_SIZE,
+      scrollPageSize: SCROLL_PAGE_SIZE,
       scriptEnv: envContext.name,
       envFile: envContext.file,
       tag: runtime.tag,
@@ -81,41 +83,11 @@ function createRuntime() {
   };
 }
 
-function createElasticsearchClient() {
-  if (process.env.ELASTICSEARCH_CLOUD_ID && process.env.ELASTICSEARCH_API_KEY) {
-    return new Client({
-      requestTimeout: 300000,
-      maxRetries: 3,
-      cloud: { id: requiredEnv("ELASTICSEARCH_CLOUD_ID") },
-      auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
-    });
-  }
-
-  if (process.env.ELASTICSEARCH_API_KEY) {
-    return new Client({
-      requestTimeout: 300000,
-      maxRetries: 3,
-      node: requiredEnv("ELASTICSEARCH_HOST"),
-      auth: { apiKey: requiredEnv("ELASTICSEARCH_API_KEY") },
-    });
-  }
-
-  return new Client({
-    requestTimeout: 300000,
-    maxRetries: 3,
-    node: requiredEnv("ELASTICSEARCH_HOST"),
-    auth: {
-      username: requiredEnv("ELASTICSEARCH_USERNAME"),
-      password: requiredEnv("ELASTICSEARCH_PASSWORD"),
-    },
-  });
-}
-
 function searchMigrationMembers(runtime) {
   return runtime.esClient.search({
     index: MEMBER_MIGRATION_INDEX,
     scroll: SCROLL_KEEP_ALIVE,
-    size: BATCH_SIZE,
+    size: SCROLL_PAGE_SIZE,
     _source: [
       "member_id",
       "tag",
@@ -242,9 +214,7 @@ function recordSkip(summary, reason, memberLabel, id) {
 }
 
 function addSample(summary, sample) {
-  if (summary.samples.length < 10) {
-    summary.samples.push(sample);
-  }
+  summary.samples.push(sample);
 }
 
 function incrementCount(target, key) {
@@ -291,85 +261,6 @@ function sortCounts(counts) {
     const countDiff = right[1] - left[1];
     return countDiff !== 0 ? countDiff : left[0].localeCompare(right[0]);
   });
-}
-
-function loadEnvContext() {
-  const requestedEnv = normalizeScriptEnv(
-    getArgValue("--env") ||
-      process.env.SCRIPT_ENV ||
-      process.env.MIGRATION_ENV ||
-      "uat"
-  );
-  const explicitEnvFile = getArgValue("--env-file") || process.env.ENV_FILE;
-  const envFile = explicitEnvFile || `.env.${requestedEnv}`;
-  const envPath = resolveProjectPath(envFile);
-
-  if (path.basename(envPath) === ".env") {
-    throw new Error("Plain .env is not supported. Use .env.uat or .env.prod.");
-  }
-
-  if (!fs.existsSync(envPath)) {
-    throw new Error(
-      `Env file not found: ${envPath}. Create it from .env.example first.`
-    );
-  }
-
-  const result = dotenv.config({ path: envPath, override: true });
-  if (result.error) {
-    throw result.error;
-  }
-
-  return {
-    name: requestedEnv,
-    file: path.relative(PROJECT_ROOT, envPath),
-  };
-}
-
-function getArgValue(name) {
-  const prefix = `${name}=`;
-  const arg = process.argv.find((item) => item.startsWith(prefix));
-
-  return arg ? arg.slice(prefix.length) : null;
-}
-
-function normalizeScriptEnv(value) {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase();
-  const aliases = {
-    develop: "uat",
-    development: "uat",
-    local: "uat",
-    sandbox: "uat",
-    production: "prod",
-  };
-
-  return aliases[normalized] || normalized || "uat";
-}
-
-function resolveProjectPath(filePath) {
-  return path.isAbsolute(filePath)
-    ? filePath
-    : path.resolve(PROJECT_ROOT, filePath);
-}
-
-function requiredEnv(name) {
-  const value = process.env[name];
-
-  if (!value) {
-    throw new Error(`Missing env: ${name}`);
-  }
-
-  return value;
-}
-
-function serializeError(error) {
-  return {
-    status:
-      error.response?.status || error.code || error.meta?.statusCode || null,
-    data: error.response?.data || error.errors || error.meta?.body || null,
-    message: error.message || "Unknown error",
-  };
 }
 
 main().catch((error) => {

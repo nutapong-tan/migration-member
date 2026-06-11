@@ -15,14 +15,14 @@ iOS/Android native in-app flows.
 - Updates `tier` only from the active native subscription returned by
   Apple/Google using the same `member_tiers` label/prefix mapping behavior as
   `olst-ms-member`; inactive subscription results update `subscription_plan` only.
-- Logs only the exact member fields that would be saved:
+- Logs each member with the migration decision and validation result:
 
-```json
-{"tier":"vvip-annual","subscription_plan":"{\"type\":\"native-iap\",...}"}
+```text
+SyncRevenueCatSubscriptionsToNativeIap.updateMember {"member":"...","result":"match","is_active":true,"platform":"ios"}
 ```
 
-This project writes mapped members into `members-migration` only. It does not
-update the real `members` index.
+The current sync script is read/log only. The `members-migration` write and final
+`members` update blocks are kept commented until the logs are verified.
 
 The migration write copies the full member document, replaces `tier` and
 `subscription_plan` with the mapped values, and adds:
@@ -38,26 +38,23 @@ The write target is `members-migration`, using the original member `_id` as the
 document id so reruns replace the same migration document instead of creating
 duplicates.
 
-There is also a commented stage-3 draft for the final `members` update. Keep it
-commented until the logs and `members-migration` documents are verified.
+Keep the write blocks commented until the logs and `members-migration` documents
+are verified.
 
 ## Structure
 
 ```text
 migration-member/
   scripts/
-    revenuecat-native-iap-migration.js
-    members-migration-subscription.js
+    sync-revenuecat-native-iap.js
+    validate-migration-subscriptions.js
+    report-subscription-types.js
+    revert-migration-by-tag.js
   .env.uat
   .env.prod
 ```
 
-Add future scripts under `scripts/<script-name>.js`.
-
-For this migration, `revenuecat` maps to
-`scripts/revenuecat-native-iap-migration.js`.
-
-`subscription` maps to `scripts/members-migration-subscription.js` and validates the migrated documents in
+`scripts/validate-migration-subscriptions.js` validates the migrated documents in
 `members-migration` by comparing:
 
 - `subscription_plan` parsed as native IAP
@@ -133,6 +130,10 @@ Android:
 
 ## Commands
 
+All scripts scan every matching document by Elasticsearch scroll. The
+`scrollPageSize` value in logs is only the per-request page size, not a total
+item limit.
+
 Syntax check every script under `scripts/`:
 
 ```bash
@@ -197,8 +198,14 @@ update the real `members` index.
 Successful conversion logs one line per member:
 
 ```text
-SyncRevenueCatSubscriptionsToNativeIap.updateMember {"tier":"...","subscription_plan":"..."}
+SyncRevenueCatSubscriptionsToNativeIap.updateMember {"member":"...","result":"match","is_active":true,"platform":"ios"}
 ```
 
-Skipped or failed members are logged with reasons. The final line contains a
-summary with `scanned`, `skipped`, `mapped`, `errors`, and platform counts.
+Skipped members are logged with reasons:
+
+```text
+SyncRevenueCatSubscriptionsToNativeIap.skipMember {"member":"...","type":"native-iap","skipped":true,"reason":"already native-iap"}
+```
+
+The final summary is printed as pretty JSON with `scanned`, `skipped`, `mapped`,
+and `errors`.
