@@ -20,7 +20,7 @@ const { serializeError } = require("../helpers/logging");
 
 const JOB_NAME = "ValidateMembersMigrationSubscription";
 const MEMBER_MIGRATION_INDEX = "members-migration";
-const SCROLL_KEEP_ALIVE = "2m";
+const SCROLL_KEEP_ALIVE = "1d";
 const SCROLL_PAGE_SIZE = 100;
 
 process.chdir(PROJECT_ROOT);

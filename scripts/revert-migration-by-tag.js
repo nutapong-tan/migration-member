@@ -11,7 +11,7 @@ const { serializeError } = require("../helpers/logging");
 const JOB_NAME = "RevertMembersFromMigrationTag";
 const MEMBER_INDEX = "members";
 const MEMBER_MIGRATION_INDEX = "members-migration";
-const SCROLL_KEEP_ALIVE = "2m";
+const SCROLL_KEEP_ALIVE = "1d";
 const SCROLL_PAGE_SIZE = 500;
 
 process.chdir(PROJECT_ROOT);

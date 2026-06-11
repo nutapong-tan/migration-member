@@ -24,7 +24,7 @@ const JOB_NAME = "SyncRevenueCatSubscriptionsToNativeIap";
 const MEMBER_INDEX = "members";
 const MEMBER_MIGRATION_INDEX = "members-migration";
 const SYSTEM_CONFIG_INDEX = "system_configs";
-const SCROLL_KEEP_ALIVE = "2m";
+const SCROLL_KEEP_ALIVE = "1d";
 const SCROLL_PAGE_SIZE = 999;
 
 process.chdir(PROJECT_ROOT);
@@ -50,13 +50,13 @@ async function main() {
       });
       runtime.memberTiers = systemConfig?._source?.member_tiers || {};
     } catch (error) {
-      console.error(
-        `[${JOB_NAME}] Failed to fetch member_tiers`,
+      logTierMappingWarning(
+        "member_tiers fetch failed",
         serializeError(error)
       );
     }
   } else {
-    console.log(`[${JOB_NAME}] MERCHANT_ID is missing, tier update will be skipped`);
+    logTierMappingWarning("MERCHANT_ID is missing");
   }
 
   try {
@@ -282,7 +282,7 @@ function logUpdateMember(payload) {
     is_active: payload.is_active,
     platform: payload.platform,
     reason: payload.reason,
-    error: payload.error?.message,
+    error: buildLogError(payload.error),
     diff: payload.diff,
   });
 }
@@ -293,7 +293,7 @@ function logMemberError(memberLabel, error) {
     member: memberLabel,
     skipped: true,
     result: "error",
-    error: serialized,
+    error: buildLogError(serialized),
   });
 }
 
@@ -303,6 +303,28 @@ function logGeneralError(message, error) {
     message,
     error: serialized,
   });
+}
+
+function logTierMappingWarning(message, error) {
+  logJson("warning", {
+    message,
+    status: error?.status,
+    reason: getErrorReason(error),
+    action: "continue_without_tier_mapping",
+  });
+}
+
+function getErrorReason(error) {
+  return error?.data?.error?.reason || error?.message;
+}
+
+function buildLogError(error) {
+  if (!error || typeof error !== "object") {
+    return error;
+  }
+
+  const { message: _message, ...logError } = error;
+  return logError;
 }
 
 function logCompleted(summary) {
